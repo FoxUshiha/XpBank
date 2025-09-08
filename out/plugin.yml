@@ -1,0 +1,20 @@
+name: XPBank
+main: com.foxsrv.xpbank.XpBank
+version: 1.0
+api-version: 1.21
+author: Fox
+depend: [Vault]
+
+commands:
+  xpb:
+    description: Comandos do sistema bancário de XP
+    usage: /<command> [deposit|withdraw|saque|buy|pay|reload]
+    permission: xpbank.use
+
+permissions:
+  xpbank.use:
+    description: Usar comandos do banco de XP
+    default: true
+  xpbank.reload:
+    description: Recarregar configs do XPBank
+    default: op

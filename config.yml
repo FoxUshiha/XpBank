@@ -1,0 +1,4 @@
+Server: "00000000-0000-0000-0000-000000000000"  # Vault Server Bank Account UUID.
+Price: 1.00           # Vault money that xp points costs.
+Interest: 0.01        # Percentage of interest that accounts receive each interval.
+Interval: 300         # Interval in seconds for each interest. Default is 5 minutes.
