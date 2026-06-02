@@ -1,7 +1,7 @@
 # XpBank
 Xp Banking Minecraft Plugin.
 
-This is a minecraft plugin for 1.21+ that adds a bank for storing XP.
+This is a minecraft plugin for 1.20+ that adds a bank for storing XP.
 
 Dependencies: Vault
 
@@ -9,12 +9,11 @@ https://www.zrips.net/cmivault/
 
 Commands:
 
-- /xpb
+- /xpb bal | balance
 - /xpb deposit
 - /xpb withdraw
-- /xpb saque
 - /xpb pay
-- /xpb buy
-- /xpb reload
+- /xpb admin give player amount
+- /xpb admin remove player amount
 
 It's Open Source :D
