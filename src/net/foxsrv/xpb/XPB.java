@@ -6,6 +6,7 @@ import org.bukkit.command.Command;
 import org.bukkit.command.CommandExecutor;
 import org.bukkit.command.CommandSender;
 import org.bukkit.command.TabCompleter;
+import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
@@ -13,7 +14,8 @@ import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.plugin.java.JavaPlugin;
 
-import java.io.*;
+import java.io.File;
+import java.io.IOException;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
@@ -26,7 +28,8 @@ public class XPB extends JavaPlugin implements CommandExecutor, TabCompleter, Li
 
     private final Map<UUID, Long> balanceCache = new ConcurrentHashMap<>();
     private final ExecutorService fileExecutor = Executors.newSingleThreadExecutor();
-    private File playerDataFolder;
+    private File dataFile;
+    private final Object saveLock = new Object(); // Para evitar concorrência na escrita do arquivo
 
     // Color constants
     private static final ChatColor PRIMARY = ChatColor.GOLD;
@@ -38,11 +41,14 @@ public class XPB extends JavaPlugin implements CommandExecutor, TabCompleter, Li
 
     @Override
     public void onEnable() {
-        playerDataFolder = new File(getDataFolder(), "playerdata");
-        if (!playerDataFolder.exists()) {
-            playerDataFolder.mkdirs();
-        }
+        // Garantir que a pasta do plugin exista
+        getDataFolder().mkdirs();
+        dataFile = new File(getDataFolder(), "users.dat");
 
+        // Carregar todos os dados do arquivo YAML
+        loadAllData();
+
+        // Registrar eventos e comandos
         getServer().getPluginManager().registerEvents(this, this);
         Objects.requireNonNull(getCommand("xpb")).setExecutor(this);
         Objects.requireNonNull(getCommand("xpb")).setTabCompleter(this);
@@ -52,9 +58,8 @@ public class XPB extends JavaPlugin implements CommandExecutor, TabCompleter, Li
 
     @Override
     public void onDisable() {
-        for (Player player : Bukkit.getOnlinePlayers()) {
-            saveBalanceAsync(player.getUniqueId(), balanceCache.get(player.getUniqueId()));
-        }
+        // Salvar todos os dados antes de desligar (síncrono para garantir)
+        saveAllDataSync();
         fileExecutor.shutdown();
         try {
             if (!fileExecutor.awaitTermination(5, TimeUnit.SECONDS)) {
@@ -67,56 +72,66 @@ public class XPB extends JavaPlugin implements CommandExecutor, TabCompleter, Li
         getLogger().info("XPBank disabled.");
     }
 
+    // ======================== DATA LOAD/SAVE (YAML) ========================
+    private void loadAllData() {
+        if (!dataFile.exists()) {
+            getLogger().info("No data file found. Starting fresh.");
+            return;
+        }
+        try {
+            YamlConfiguration yaml = YamlConfiguration.loadConfiguration(dataFile);
+            for (String uuidStr : yaml.getKeys(false)) {
+                try {
+                    UUID uuid = UUID.fromString(uuidStr);
+                    long balance = yaml.getLong(uuidStr);
+                    if (balance > 0) {
+                        balanceCache.put(uuid, balance);
+                    }
+                } catch (IllegalArgumentException e) {
+                    getLogger().log(Level.WARNING, "Invalid UUID in data file: " + uuidStr, e);
+                }
+            }
+            getLogger().info("Loaded " + balanceCache.size() + " player balances.");
+        } catch (Exception e) {
+            getLogger().log(Level.SEVERE, "Failed to load data file!", e);
+        }
+    }
+
+    private void saveAllDataSync() {
+        synchronized (saveLock) {
+            YamlConfiguration yaml = new YamlConfiguration();
+            for (Map.Entry<UUID, Long> entry : balanceCache.entrySet()) {
+                if (entry.getValue() > 0) {
+                    yaml.set(entry.getKey().toString(), entry.getValue());
+                } else {
+                    yaml.set(entry.getKey().toString(), null); // remove entries with zero balance
+                }
+            }
+            try {
+                yaml.save(dataFile);
+            } catch (IOException e) {
+                getLogger().log(Level.SEVERE, "Failed to save data file!", e);
+            }
+        }
+    }
+
+    private void saveAllDataAsync() {
+        fileExecutor.submit(this::saveAllDataSync);
+    }
+
     // ======================== EVENTS ========================
     @EventHandler
     public void onPlayerJoin(PlayerJoinEvent event) {
-        Player player = event.getPlayer();
-        UUID uuid = player.getUniqueId();
-        long balance = loadBalanceFromFile(uuid);
-        balanceCache.put(uuid, balance);
+        UUID uuid = event.getPlayer().getUniqueId();
+        // Garantir que o jogador tenha uma entrada no cache (se não existir, coloca 0)
+        balanceCache.putIfAbsent(uuid, 0L);
     }
 
     @EventHandler
     public void onPlayerQuit(PlayerQuitEvent event) {
-        UUID uuid = event.getPlayer().getUniqueId();
-        Long balance = balanceCache.remove(uuid);
-        if (balance != null) {
-            saveBalanceAsync(uuid, balance);
-        }
-    }
-
-    // ======================== FILE OPERATIONS (ASYNC) ========================
-    private long loadBalanceFromFile(UUID uuid) {
-        File file = new File(playerDataFolder, uuid.toString() + ".dat");
-        if (!file.exists()) return 0L;
-        try (DataInputStream dis = new DataInputStream(new FileInputStream(file))) {
-            return dis.readLong();
-        } catch (IOException e) {
-            getLogger().log(Level.WARNING, "Failed to load balance for " + uuid, e);
-            return 0L;
-        }
-    }
-
-    private void saveBalanceToFile(UUID uuid, long balance) {
-        File file = new File(playerDataFolder, uuid.toString() + ".dat");
-        try (DataOutputStream dos = new DataOutputStream(new FileOutputStream(file))) {
-            dos.writeLong(balance);
-        } catch (IOException e) {
-            getLogger().log(Level.WARNING, "Failed to save balance for " + uuid, e);
-        }
-    }
-
-    private void saveBalanceAsync(UUID uuid, long balance) {
-        fileExecutor.submit(() -> saveBalanceToFile(uuid, balance));
-    }
-
-    private void updateBalance(UUID uuid, long newBalance, boolean asyncSave) {
-        balanceCache.put(uuid, newBalance);
-        if (asyncSave) {
-            saveBalanceAsync(uuid, newBalance);
-        } else {
-            saveBalanceToFile(uuid, newBalance);
-        }
+        // Não precisa remover do cache, mantemos para persistência
+        // O cache continuará com o saldo, mas o arquivo já estará atualizado
+        // (cada operação já salva o arquivo, então não há perda)
     }
 
     // ======================== HELPER METHODS ========================
@@ -131,7 +146,12 @@ public class XPB extends JavaPlugin implements CommandExecutor, TabCompleter, Li
     private boolean addBalance(UUID uuid, long amount, boolean asyncSave) {
         if (amount < 0) return false;
         long newBalance = getBalance(uuid) + amount;
-        updateBalance(uuid, newBalance, asyncSave);
+        balanceCache.put(uuid, newBalance);
+        if (asyncSave) {
+            saveAllDataAsync();
+        } else {
+            saveAllDataSync();
+        }
         return true;
     }
 
@@ -140,7 +160,16 @@ public class XPB extends JavaPlugin implements CommandExecutor, TabCompleter, Li
         long current = getBalance(uuid);
         if (current < amount) return false;
         long newBalance = current - amount;
-        updateBalance(uuid, newBalance, asyncSave);
+        if (newBalance == 0) {
+            balanceCache.remove(uuid);
+        } else {
+            balanceCache.put(uuid, newBalance);
+        }
+        if (asyncSave) {
+            saveAllDataAsync();
+        } else {
+            saveAllDataSync();
+        }
         return true;
     }
 
@@ -212,14 +241,16 @@ public class XPB extends JavaPlugin implements CommandExecutor, TabCompleter, Li
             sender.sendMessage(SUCCESS + "Added " + SECONDARY + amount + SUCCESS + " levels to " + target.getName() + ". New balance: " + VALUE + getBalance(target.getUniqueId()));
             target.sendMessage(SUCCESS + "An administrator added " + SECONDARY + amount + SUCCESS + " levels to your account. Balance: " + VALUE + getBalance(target.getUniqueId()));
         } else {
+            // Offline player: obter UUID e modificar cache diretamente
             UUID offlineUUID = getOfflineUUID(targetName);
             if (offlineUUID == null) {
                 sender.sendMessage(ERROR + "Player has never played on this server.");
                 return;
             }
-            long currentBalance = loadBalanceFromFile(offlineUUID);
+            long currentBalance = getBalance(offlineUUID);
             long newBalance = currentBalance + amount;
-            saveBalanceToFile(offlineUUID, newBalance);
+            balanceCache.put(offlineUUID, newBalance);
+            saveAllDataAsync();
             sender.sendMessage(SUCCESS + "Added " + SECONDARY + amount + SUCCESS + " levels to offline player " + targetName + ". New balance: " + VALUE + newBalance);
         }
     }
@@ -243,13 +274,18 @@ public class XPB extends JavaPlugin implements CommandExecutor, TabCompleter, Li
                 sender.sendMessage(ERROR + "Player has never played on this server.");
                 return;
             }
-            long currentBalance = loadBalanceFromFile(offlineUUID);
+            long currentBalance = getBalance(offlineUUID);
             if (currentBalance < amount) {
                 sender.sendMessage(ERROR + "Insufficient balance! Current balance: " + VALUE + currentBalance);
                 return;
             }
             long newBalance = currentBalance - amount;
-            saveBalanceToFile(offlineUUID, newBalance);
+            if (newBalance == 0) {
+                balanceCache.remove(offlineUUID);
+            } else {
+                balanceCache.put(offlineUUID, newBalance);
+            }
+            saveAllDataAsync();
             sender.sendMessage(SUCCESS + "Removed " + SECONDARY + amount + SUCCESS + " levels from offline player " + targetName + ". New balance: " + VALUE + newBalance);
         }
     }
@@ -288,7 +324,7 @@ public class XPB extends JavaPlugin implements CommandExecutor, TabCompleter, Li
                     if (offlineUUID == null) {
                         sender.sendMessage(ERROR + "Player has never played on this server.");
                     } else {
-                        long balance = loadBalanceFromFile(offlineUUID);
+                        long balance = getBalance(offlineUUID);
                         sender.sendMessage(PRIMARY + "Offline balance of " + targetName + ": " + VALUE + balance);
                     }
                 }
